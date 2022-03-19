@@ -1,0 +1,398 @@
+---
+title: "Turn Tables Into Animations Using R"
+author: "Kevin Tsang"
+date: "19/03/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+![](weather_viz.jpg)
+
+## Introduction
+Presenting data with temporal and geographic features are often more engaging through animations and maps. This post will give a walkthrough on using R to extract the data from public sources, wrangle the data, and create an animation of a map.
+
+The data we will be using is the [daily weather summaries of 2020](https://digital.nmla.metoffice.gov.uk/SO_72b4d5a3-e5f0-41dc-a31d-1a3c8c4f1f59/) provided by the [Met Office](https://www.metoffice.gov.uk/) (based in the UK). The data is stored as tables within a PDF, which we will have to parse using the `pdftools` package. The exact location (longitude and latitude) of each [weather station](https://www.metoffice.gov.uk/research/climate/maps-and-data/uk-synoptic-and-climate-stations) will be referenced using web-scraping methods from the `rvest` package. To source the country boundary data and coordinates, we will use the `rnaturalearth` package, which sources the coordinates from [Natural Earth](https://www.naturalearthdata.com/).
+
+To manipulate and wrangle the data, we will use the `dplyr` and `tidyverse` toolkit. For the plots, we will use the `ggplot2`, `gganimate`, and `sf` package.
+
+```{r message=FALSE}
+
+library(tidyverse)
+library(pdftools)
+library(stringr)
+library(ggplot2)
+library(lubridate)
+library(janitor)
+library(fuzzyjoin)
+
+library(gganimate)
+
+library(robotstxt)
+library(rvest)
+
+library(sf)
+library(rgeos)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(rnaturalearthhires)
+```
+
+This post will cover:
+
+- PDF parsing
+- Web scraping
+- Data wrangling
+- Plotting maps with `sf`
+- Animating plots with `gganimate`
+
+## Parsing PDF Data
+
+In this example, we will focus on using one month's weather summary (January 2020).
+
+First, download the daily weather summary for January 2020, "DWS_2020_01", file from the [Met Office Digital Archive and Library website](https://digital.nmla.metoffice.gov.uk/IO_8399517f-6890-44b7-8a48-e2880f78d511/) and put it in your working directory.
+
+Second, we will extract the information from the tables in the PDF file. Let's load the PDF file into R.
+
+```{r}
+dws_file_path <- "./DWS_2020_01.pdf"
+
+# import pdf as text
+dws_text <- pdf_text(dws_file_path)
+
+print(dws_text[4])
+```
+
+The `dws_text` variable is a list of text strings for each page of the PDF. To filter out the irrelevant pages of information, we will use `grepl` to look for the pages with "Selected UK readings".
+
+```{r}
+# select tables for UK stations
+weather_tables <- dws_text[grepl("Selected UK readings at ",dws_text)]
+
+print(paste0("length(weather_tables) = ", length(weather_tables)))
+```
+
+This operation should reduce the length of the `dws_text` variable to 31, representing the 31 days in January. We call this shortened list `weather_tables`, where each element of the list is a string of information extracted from a weather table about a single day.
+
+In order to transform the string into a table or data frame that we can easily manipulate, we will define a function `extract_weather_table`. The function takes the string containing a single weather table and outputs a data frame with the weather table data. The function carries out the following operations:
+
+1. Split the string by the `\n` characters.
+2. Organise the data into 14 columns (the number of columns in the PDF file).
+3. Remove the first 10 rows of extracted data, which are not data of the weather table.
+4. Update the column names.
+5. Pivot the table into a long format, which is considered as a tidy format for R data wrangling. Meaning the data table will not have the information about 0000 UTC and 1200 UTC in separate columns, but the 0000 UTC will be in one row and 1200 UTC will be in another row.
+
+
+``` {r}
+extract_weather_table <- function(table_list){
+  # input: single weather table in list format
+  # output: single weather table in data.frame format
+  
+  # extract table
+  weather_table <- unlist(strsplit(table_list, "\n"))
+  weather_table <- str_split_fixed(weather_table," {2,}",14)
+  weather_table_df <- data.frame(weather_table[11:nrow(weather_table),])
+
+  # update column names
+  colnames(weather_table_df) <- c(weather_table[9,1:2],
+                                  paste(weather_table[9,3:8], "_0000"),
+                                  paste(weather_table[9,9:14], "_1200"))
+  weather_table_df <- weather_table_df %>%
+    filter(SITE!="")
+  
+  # pivot and re-organise time
+  weather_long <- pivot_longer(weather_table_df, cols = c(-"NO",-"SITE"))
+  weather_long$TIME <- str_split_fixed(weather_long$name, "_", 2)[,2]
+  weather_long$name <- str_split_fixed(weather_long$name, "_", 2)[,1]
+  weather_wide <- pivot_wider(weather_long, 
+                              id_cols = c(NO, SITE,TIME), 
+                              names_from = name, 
+                              values_from = value)
+  
+  weather_table_df <- weather_wide
+  weather_table_df$DATE <- parse_date_time(str_split(weather_table[1],"for ")[[1]][2], "AdbY")
+  
+  return(weather_table_df)
+}
+```
+
+Let's see this in action for the 1st January 2020 weather table. Feel free to compare `weather_table_2020_01_01` with the corresponding weather table in the PDF.
+
+```{r}
+weather_table_2020_01_01 <- extract_weather_table(weather_tables[1])
+
+head(weather_table_2020_01_01)
+```
+
+We will now repeat the process for the other days of the month and join them all into one data frame `month_weather_df`.
+
+``` {r}
+for (table_i in 1:length(weather_tables)) {
+  day_weather_df <- extract_weather_table(weather_tables[table_i])
+  if (table_i == 1){
+    month_weather_df <- day_weather_df
+  } else {
+    month_weather_df <- rbind(month_weather_df, day_weather_df)
+  }
+}
+
+# clean names (for R format)
+month_weather_df <- month_weather_df %>%
+  clean_names()
+```
+
+To save time in the future and not have to parse the PDF again, we can save the data frame as a csv.
+
+``` {r}
+# optional export
+write_csv(month_weather_df, "met_office_dws_2020_01.csv")
+```
+
+## Web Scraping
+
+Using the name of weather station, we can obtain the exact location (longitude and latitude) of the station using information from the [Met Office website](https://www.metoffice.gov.uk/research/climate/maps-and-data/uk-synoptic-and-climate-stations). Instead of copy and pasting the information, we can automate the process using web scraping.
+
+First, check that the Met Office website allows web scraping using the `robotstxt` package.
+
+```{r}
+website_path <- "https://www.metoffice.gov.uk/research/climate/maps-and-data/uk-synoptic-and-climate-stations"
+
+# check website allow bots
+paths_allowed(website_path)
+```
+
+Now we can scrape the website for the table of locations using the `rvest` package. 
+
+```{r}
+# scrape page
+page <- read_html(website_path)
+
+table_text <- page %>%
+  html_nodes("tbody tr") %>%
+  html_text()
+```
+
+`table_text` is a list where each element is a row of the table. It is a bit untidy and will need to be organised into 4 columns: station name, country, location, and station type. We will use a similar method of parsing the strings in the PDF above.
+
+```{r}
+# become table
+stations_df <- data.frame(str_split_fixed(table_text, "\n", 4))
+colnames(stations_df) <- c("station_name", "country", "location", "station_type")
+
+# long lat
+split_location <- str_split_fixed(stations_df$location, ",", 2)
+stations_df$lat <- split_location[,1]
+stations_df$long <- split_location[,2]
+
+stations_df <- stations_df %>%
+  mutate_all(str_replace_all, "[\r\n]" , "") %>%
+  select(-location)
+
+head(stations_df)
+```
+
+Checking `stations_df` with the information on the website, we can confirm that the weather station locations table has been correctly extracted. We can save this as a csv for future use.
+
+```{r}
+# optional export
+write_csv(stations_df, "met_office_station_locations.csv")
+```
+
+
+## Data Wrangling
+
+Here, we will transform and cleanup the data frames.
+
+If you have saved the daily weather summaries and station locations as a csv, we can load these now. Otherwise, the data frames should already be in your environment.
+
+```{r message=FALSE}
+# optional import
+month_weather_df <- read_csv("met_office_dws_2020_01.csv")
+stations_df <- read_csv("met_office_station_locations.csv")
+```
+
+Currently, the `stations_df` data frame contains the locations for Met Office weather stations across the whole of the UK, not just the ones we have the daily weather summaries. We will create a shortened data frame `stations_small_df` that only includes these weather stations. Furthermore, some of the station names are not exactly paired between the two data frames, which we will have to tackle.
+
+Using the `unique` function, we make a data frame that includes the sites included in the daily weather summaries. We remove any duplicates in the `stations_df` and only include the automatic weather stations.
+
+```{r}
+stations_small_df <- data.frame(unique(month_weather_df$site))
+colnames(stations_small_df) <- "station_name_dws"
+
+# remove duplicates
+location_clean_df <- stations_df[!duplicated(stations_df[c("lat","long")]),]
+
+location_clean_df <- location_clean_df %>%
+  filter(station_type == "Automatic")
+
+# correct weather station name
+location_clean_df[location_clean_df$station_name == "Filton",]$station_name <- "Filton and Almondsbury"
+```
+
+Now we attach the longitudes and latitudes of the weather stations to the `stations_small_df` data frame. Since not all station names have an exact match between the two sources, we will use `fuzzyjoin` to join the two data frames.
+
+```{r}
+# join coordinates
+stations_small_df <- regex_right_join(
+  location_clean_df, 
+  stations_small_df, 
+  by = c(station_name="station_name_dws"))
+
+stations_small_df <- stations_small_df %>% select(-"station_name")
+colnames(stations_small_df)[5] <- "station_name"
+# colnames(stations_small_df)[grepl("station_name",colnames(stations_small_df))] <- "station_name"
+
+# reorder columns
+stations_small_df <- stations_small_df[,c(5,1,2,3,4)]
+```
+
+We can save the smaller, cleaned locations data frame for future use.
+
+```{r}
+# optional export
+write_csv(stations_small_df, "met_office_station_locations_small.csv")
+```
+
+## Plotting
+
+Using the `rnaturalearth` package, we will extract the UK's geometries with the `ne_states` function.
+
+```{r}
+# UK geometries
+uk_sf <- ne_states(country = "united kingdom", returnclass = "sf")
+isle_of_man_sf <- ne_states(country = "isle of man", returnclass = "sf")
+
+uk_sf <- rbind(uk_sf,isle_of_man_sf)
+```
+
+NOTE: At the time of writing, the Wales regions of "West Wales and the Valleys" and "East Wales" are the wrong way around.
+
+```{r}
+# correct east wales and west wales
+uk_sf$region <- plyr::mapvalues(
+  uk_sf$region,
+  from = c("West Wales and the Valleys",
+           "East Wales"),
+  to = c("East Wales",
+         "West Wales and the Valleys")
+)
+```
+
+
+Using the `sf` package, we will transform the longitudes and latitudes of the weather stations from the `stations_df` data frame into `sf` format.
+
+```{r}
+stations_geom.df <- stations_small_df %>%
+  st_as_sf(coords = c("long", "lat"), crs = 4326) %>%
+  st_set_crs(4326)
+```
+
+Here, we will plot the locations of the weather stations on the map of the UK.
+
+```{r out.width="80%"}
+uk_stations_plot <- ggplot() + 
+  geom_sf(data = uk_sf,
+          aes(fill = region)) +
+  geom_sf(data = stations_geom.df,
+          color = "red", size = 2) +
+  guides(fill=guide_legend(ncol=2)) +
+  labs(
+    title = "UK Weather Stations"
+  )
+uk_stations_plot
+```
+
+
+### Cloud Coverage
+
+As an example, we will display the daily cloud coverage across the UK. 
+
+The wrangling will look up the cloud coverage of each county at the closest site (according the the middle point of each county).
+
+First determine the closest weather station using the `st_distance` function, which calculate the distance between coordinates.
+
+```{r}
+county_sf <- uk_sf
+
+closest <- list()
+for(i in 1:nrow(county_sf)){
+  cent <- st_centroid(county_sf$geometry[i])
+  closest[[i]] <- stations_geom.df$station_name[which.min(
+    st_distance(cent, stations_geom.df$geometry))]
+}
+
+county_sf$closest_site <- unlist(closest)
+
+``` 
+
+Then, we will use `left_join` to look up the weather at each of the coordinates for each day. The `day=day(date)` will set a new column `day` that is the day of the month.
+
+```{r}
+weather_df <- left_join(month_weather_df, stations_small_df, by = c("site" = "station_name"))
+
+# average cloud cover per day
+weather_county_df <- weather_df %>%
+  group_by(site, day=day(date)) %>%
+  summarise(cloud = mean(as.numeric(cloud), na.rm=T))
+
+weather_county_df <- full_join(county_sf[,c("closest_site","geometry")],
+                               weather_county_df,
+                               by = c("closest_site" = "site"))
+```
+
+We can represent the cloud coverage on the 1st January 2020 using a varying transparency level (`alpha`) depending on cloud coverage.
+
+``` {r}
+day_cloud_plot <- ggplot() + 
+  geom_sf(data = filter(weather_county_df, day==1), 
+          aes(alpha = cloud/9), 
+          fill = "#5090aa",
+          color = NA) +
+  labs(title = "Cloud Coverage on 1 Jan 2020",
+       caption = "Source: Met Office",
+       alpha = "Cloud") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5,
+                                  size=22),
+        plot.caption = element_text(size = 15),
+        legend.position = "none")
+day_cloud_plot
+```
+
+Now we animate the cloud coverage in the UK for each day of January 2020, this is done using `transition_manual(day)` which sets a frame of the animation based on the data segemented by `day` (the day of the month).
+
+```{r}
+
+county_plot <- ggplot() + 
+  geom_sf(data = weather_county_df, 
+          aes(alpha = cloud/9), 
+          fill = "#5090aa",
+          color = NA) +
+  labs(title = "Cloud Coverage on {current_frame} Jan 2020",
+       caption = "Source: Met Office",
+       alpha = "Cloud") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5,
+                                  size=22),
+        plot.caption = element_text(size = 15),
+        legend.position = "none") +
+  transition_manual(day)
+
+animate(county_plot, fps = 4)
+```
+
+We can save the plots and animations using `ggsave` and `anisave`.
+
+```{r eval=FALSE}
+ggsave("day_cloud.png",day_cloud_plot)
+anim_save("Jan_cloud.gif", animate(county_plot, fps = 4))
+```
+
+## Summary
+
+You have learnt to read and parse a PDF that includes tabled data, scrape information from a website, transform the data and strings into useful information, and display that information via an animated map. We turned tables of numbers into an animation of the cloud coverage in the UK over January 2020.
+
+Thank you for reading!
