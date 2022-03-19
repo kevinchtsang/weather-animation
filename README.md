@@ -14,4 +14,4 @@ This post will cover:
 - Plotting maps with `sf`
 - Animating plots with `gganimate`
 
-Continue reading at (https://kevinchtsang.github.io/weather-animation/)[https://kevinchtsang.github.io/weather-animation/]
+Continue reading at [https://kevinchtsang.github.io/weather-animation/](https://kevinchtsang.github.io/weather-animation/)
