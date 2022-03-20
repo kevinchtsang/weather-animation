@@ -1,8 +1,12 @@
 ---
 title: "Turn Tables Into Animations Using R"
 author: "Kevin Tsang"
-date: "19/03/2022"
-output: html_document
+date: "Published: 19/03/2022"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
 ---
 
 ```{r setup, include=FALSE}
@@ -49,6 +53,8 @@ This post will cover:
 - Plotting maps with `sf`
 - Animating plots with `gganimate`
 
+----
+
 ## Parsing PDF Data
 
 In this example, we will focus on using one month's weather summary (January 2020).
@@ -63,7 +69,7 @@ dws_file_path <- "./DWS_2020_01.pdf"
 # import pdf as text
 dws_text <- pdf_text(dws_file_path)
 
-print(dws_text[4])
+print(dws_text[7])
 ```
 
 The `dws_text` variable is a list of text strings for each page of the PDF. To filter out the irrelevant pages of information, we will use `grepl` to look for the pages with "Selected UK readings".
@@ -80,10 +86,11 @@ This operation should reduce the length of the `dws_text` variable to 31, repres
 In order to transform the string into a table or data frame that we can easily manipulate, we will define a function `extract_weather_table`. The function takes the string containing a single weather table and outputs a data frame with the weather table data. The function carries out the following operations:
 
 1. Split the string by the `\n` characters.
-2. Organise the data into 14 columns (the number of columns in the PDF file).
-3. Remove the first 10 rows of extracted data, which are not data of the weather table.
-4. Update the column names.
-5. Pivot the table into a long format, which is considered as a tidy format for R data wrangling. Meaning the data table will not have the information about 0000 UTC and 1200 UTC in separate columns, but the 0000 UTC will be in one row and 1200 UTC will be in another row.
+2. Split the strings by at least 2 space characters.
+3. Organise the data into 14 columns (the number of columns in the PDF file).
+4. Remove the first 10 rows of extracted data, which are not data of the weather table.
+5. Update the column names.
+6. Pivot the table into a long format, which is considered as a tidy format for R data wrangling. Meaning the data table will not have the information about 0000 UTC and 1200 UTC in separate columns, but the 0000 UTC will be in one row and 1200 UTC will be in another row.
 
 
 ``` {r}
@@ -396,3 +403,9 @@ anim_save("Jan_cloud.gif", animate(county_plot, fps = 4))
 You have learnt to read and parse a PDF that includes tabled data, scrape information from a website, transform the data and strings into useful information, and display that information via an animated map. We turned tables of numbers into an animation of the cloud coverage in the UK over January 2020.
 
 Thank you for reading!
+
+----
+
+## About Author
+
+[Kevin Tsang](https://github.com/kevinchtsang) is a final year PhD student at University of Edinburgh applying machine learning, data science, mHealth, and mathematics to asthma attack prediction.
